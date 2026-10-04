@@ -78,12 +78,11 @@ def build_s3_client():
 
 
 S3_CLIENT = build_s3_client()
-ACCEPTED_MODELS: set[str] = {"timur", "MusicGen"}
+# "Facebook/MusicGen-Small" is the name LiteLLM sends, so it must not depend on the inference being up.
+ACCEPTED_MODELS: set[str] = {"timur", "MusicGen", "Facebook/MusicGen-Small"}
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global ACCEPTED_MODELS
+async def refresh_accepted_models() -> None:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{SETTINGS.musicgen_api_base}/healthz")
@@ -98,6 +97,11 @@ async def lifespan(app: FastAPI):
                 LOGGER.warning("Inference healthz returned %s: %s", response.status_code, response.text)
     except Exception as exc:
         LOGGER.warning("Could not fetch dynamic models from inference: %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await refresh_accepted_models()
     yield
 
 
@@ -382,6 +386,9 @@ async def healthz() -> JSONResponse:
 
 @app.post("/v1/chat/completions")
 async def create_chat_completion(payload: ChatCompletionRequest):
+    if payload.model not in ACCEPTED_MODELS:
+        # The inference may have been down at startup: retry the model names before rejecting.
+        await refresh_accepted_models()
     if payload.model not in ACCEPTED_MODELS:
         raise HTTPException(status_code=400, detail=f"model must be one of: {sorted(ACCEPTED_MODELS)}.")
 
